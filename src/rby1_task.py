@@ -300,23 +300,54 @@ class RBY1Task(BaseTask):
         )
         ground_plane._collision_prim.set_contact_offset(0.002)
         ground_plane._collision_prim.set_rest_offset(0.0)
-        
+
+        # Lab environment
         add_lab_environment(scene.stage)
 
         if self.gripper_asset_config is None:
             gripper_label = "off" if not self.gripper_enabled else "base-usd"
         else:
             gripper_label = self.gripper_asset_config.name
+
         print(
-            f"[RBY1Task] model={self.robot_model}, gripper={gripper_label}, "
+            f"[RBY1Task] model={self.robot_model}, "
+            f"gripper={gripper_label}, "
             f"usd_path={self.usd_path}"
         )
-        add_reference_to_stage(usd_path=self.usd_path, prim_path=self.robot_prim_path)
-        self.head_realsense = mount_head_realsense(scene.stage, robot_prim_path=self.robot_prim_path)
 
+        # ---------------------------------------------------------
+        # RBY1 USD
+        # ---------------------------------------------------------
+        add_reference_to_stage(
+            usd_path=self.usd_path,
+            prim_path=self.robot_prim_path,
+        )
+
+        # ---------------------------------------------------------
+        # Cameras
+        # ---------------------------------------------------------
+        from head_realsense import mount_head_realsense
+        from ee_right_realsense import mount_ee_right_realsense
+
+        self.head_realsense = mount_head_realsense(
+            scene.stage,
+            robot_prim_path=self.robot_prim_path,
+        )
+
+        self.ee_right_realsense = mount_ee_right_realsense(
+            scene.stage,
+            robot_prim_path=self.robot_prim_path,
+        )
+
+        # ---------------------------------------------------------
+        # Gripper
+        # ---------------------------------------------------------
         if self.gripper_asset_config is not None:
             self._add_gripper_to_robot(scene.stage)
 
+        # ---------------------------------------------------------
+        # RBY1 object
+        # ---------------------------------------------------------
         self.rby_robot = RBY1Robot(
             prim_path=self.robot_prim_path,
             name="RBY1",
@@ -324,11 +355,13 @@ class RBY1Task(BaseTask):
             orientation=np.array([1.0, 0.0, 0.0, 0.0]),
             robot_model=self.robot_model,
         )
+
         self.robot = scene.add(self.rby_robot)
+
         self.rby_robot.set_joint_properties(scene.stage)
         self.rby_robot.set_properties(scene.stage)
-        # Self-collision left disabled — enabling it with the current USD collision
-        # geometry causes joint instability. A USD collision fix is planned.
+
+        # Self-collision left disabled.
         self.robot.set_enabled_self_collisions(False)
         self.robot.set_solver_position_iteration_count(4)
         self.robot.set_solver_velocity_iteration_count(1)

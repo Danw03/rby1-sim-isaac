@@ -191,9 +191,14 @@ class Simulation:
         self.simulator.update()
 
         from head_realsense import start_head_realsense_ros
+        from ee_right_realsense import start_ee_right_realsense_ros
 
-        self.head_camera_writers = start_head_realsense_ros(
+        self.head_realsense = start_head_realsense_ros(
             self.task.head_realsense
+        )
+
+        self.ee_right_realsense = start_ee_right_realsense_ros(
+            self.task.ee_right_realsense
         )
 
         self._last_render_wall_time = 0.0

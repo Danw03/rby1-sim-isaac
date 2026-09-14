@@ -1,18 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Head-mounted D435i-like RGB-D camera for RBY1 Isaac Sim 5.1.
-
-Implementation strategy
------------------------
-Isaac Sim 5.1 ships an Intel RealSense D455 USD, but not a complete D435i USD.
-We therefore keep the D455 asset as the visual/sensor rig placeholder and
-override its color/depth pinhole optics to a D435i-like profile.
+Right-EE D405-like RGB-D camera for RBY1 Isaac Sim 5.1.
 
 Call order:
-    mount_head_realsense(stage, robot_prim_path)
+    mount_ee_right_realsense(stage, robot_prim_path)
         -> during RBY1Task.set_up_scene()
 
-    start_head_realsense_ros(handles)
+    start_ee_right_realsense_ros(handles)
         -> after world.reset() and renderer initialization
 
 IMPORTANT:
@@ -30,60 +24,55 @@ import omni.replicator.core as rep
 import omni.syntheticdata
 import omni.syntheticdata._syntheticdata as sd
 
-from isaacsim.core.utils.stage import add_reference_to_stage
-from isaacsim.storage.native import get_assets_root_path, get_full_asset_path
-from pxr import Gf, UsdGeom, UsdPhysics
+from pxr import Gf, UsdGeom
 
 
 # -----------------------------------------------------------------------------
-# User-tunable head mount
+# User-tunable wrist mount
 # -----------------------------------------------------------------------------
 
-HEAD_LINK_NAME = "link_head_2"
+EE_LINK_NAME = "ee_right"
 
-# IMPORTANT:
-# Replace these with the values you already tuned in Isaac GUI, if different.
-HEAD_MOUNT_TRANSLATION_M = (0.05, 0.0, 0.055)
-HEAD_MOUNT_ROTATION_DEG = (0.0, 0.0, 0.0)
+# Same transform as the current simulation/mock camera TF:
+# translation = [0, 0, 0]
+# quaternion xyzw = [0, +sqrt(1/2), 0, +sqrt(1/2)]
+MOUNT_TRANSLATION_M = (0.0, 0.0, 0.0)
+MOUNT_ROTATION_XYZW = (
+    0.0,
+    0.7071067811865476,
+    0.0,
+    0.7071067811865476,
+)
 
 
 # -----------------------------------------------------------------------------
-# D435i-like optical profile
+# D405-like profile
 # -----------------------------------------------------------------------------
 
-RESOLUTION = (848, 480)
+RESOLUTION = (640, 360)
+HFOV_DEG = 87.0
 
-COLOR_HFOV_DEG = 69.0
-DEPTH_HFOV_DEG = 87.0
+COLOR_CLIP_M = (0.05, 2.00)
+DEPTH_CLIP_M = (0.07, 0.50)
 
-COLOR_CLIP_M = (0.05, 10.0)
-DEPTH_CLIP_M = (0.30, 3.00)
-
-NODE_NAMESPACE = "rby1/head_camera"
+NODE_NAMESPACE = "rby1/right_camera"
 
 COLOR_IMAGE_TOPIC = "color/image_raw"
 COLOR_INFO_TOPIC = "color/camera_info"
 DEPTH_IMAGE_TOPIC = "depth/image_raw"
 DEPTH_INFO_TOPIC = "depth/camera_info"
 
-COLOR_FRAME_ID = "head_camera_color_optical_frame"
-DEPTH_FRAME_ID = "head_camera_depth_optical_frame"
+COLOR_FRAME_ID = "right_d405_color_optical_frame"
+DEPTH_FRAME_ID = "right_d405_depth_optical_frame"
 
-
-D455_ASSET_CANDIDATES = (
-    "/Isaac/Sensors/RealSense/D455/rsd455.usd",
-    "/Isaac/Sensors/Realsense/D455/rsd455.usd",
-    "/Isaac/Sensors/Intel/RealSense/D455/rsd455.usd",
-    "/Isaac/Sensors/Intel/RealSense/rsd455.usd",
-    "/Isaac/Sensors/intel/RealSense/rsd455.usd",
-)
+# visual-only housing approximation
+HOUSING_SIZE_M = (0.042, 0.023, 0.042)
 
 
 @dataclass
-class HeadRealSenseHandles:
-    head_path: str
-    mount_path: str
-    asset_root_path: str
+class EERightRealSenseHandles:
+    ee_path: str
+    camera_link_path: str
     color_camera_path: str
     depth_camera_path: str
     color_render_product: str | None = None
@@ -99,27 +88,10 @@ def _find_unique_prim_by_name(stage, name: str) -> str:
     ]
     if len(matches) != 1:
         raise RuntimeError(
-            f"[HeadCamera] Expected exactly one prim named {name!r}, "
+            f"[EERightCamera] Expected exactly one prim named {name!r}, "
             f"found {len(matches)}: {matches}"
         )
     return matches[0]
-
-
-def _resolve_d455_asset() -> str:
-    for candidate in D455_ASSET_CANDIDATES:
-        for query in (candidate, candidate.lstrip("/")):
-            try:
-                resolved = get_full_asset_path(query)
-                if resolved:
-                    return resolved
-            except Exception:
-                pass
-
-    assets_root = get_assets_root_path()
-    if not assets_root:
-        raise RuntimeError("[HeadCamera] Isaac Sim assets root could not be resolved.")
-
-    return assets_root.rstrip("/") + D455_ASSET_CANDIDATES[0]
 
 
 def _configure_pinhole(
@@ -132,7 +104,7 @@ def _configure_pinhole(
 ) -> None:
     prim = stage.GetPrimAtPath(camera_path)
     if not prim.IsValid() or not prim.IsA(UsdGeom.Camera):
-        raise RuntimeError(f"[HeadCamera] Invalid camera prim: {camera_path}")
+        raise RuntimeError(f"[EERightCamera] Invalid camera prim: {camera_path}")
 
     camera = UsdGeom.Camera(prim)
 
@@ -149,29 +121,26 @@ def _configure_pinhole(
     camera.GetClippingRangeAttr().Set(Gf.Vec2f(*clip_m))
 
 
-def _remove_nested_rigid_body(stage, body_path: str) -> None:
-    prim = stage.GetPrimAtPath(body_path)
-    if not prim.IsValid():
-        print(f"[HeadCamera] WARNING: sensor body not found: {body_path}")
-        return
+def _make_camera(stage, path: str, clip_m: tuple[float, float]):
+    camera = UsdGeom.Camera.Define(stage, path)
 
-    if prim.HasAPI(UsdPhysics.RigidBodyAPI):
-        try:
-            prim.RemoveAPI(UsdPhysics.RigidBodyAPI)
-            print(f"[HeadCamera] Removed nested RigidBodyAPI: {body_path}")
-        except Exception:
-            rigid = UsdPhysics.RigidBodyAPI(prim)
-            rigid.CreateRigidBodyEnabledAttr().Set(False)
+    # USD camera looks down local -Z.  Rotate it so the D405 camera-link +X
+    # acts as sensor-forward.
+    api = UsdGeom.XformCommonAPI(camera.GetPrim())
+    api.SetRotate(
+        Gf.Vec3f(90.0, 0.0, -90.0),
+        UsdGeom.XformCommonAPI.RotationOrderXYZ,
+    )
 
-    if prim.HasAPI(UsdPhysics.MassAPI):
-        try:
-            prim.RemoveAPI(UsdPhysics.MassAPI)
-        except Exception:
-            pass
+    _configure_pinhole(
+        stage,
+        path,
+        hfov_deg=HFOV_DEG,
+        resolution=RESOLUTION,
+        clip_m=clip_m,
+    )
 
-    enabled_attr = prim.GetAttribute("physics:rigidBodyEnabled")
-    if enabled_attr.IsValid():
-        enabled_attr.Set(False)
+    return camera
 
 
 def _render_product_path(render_product) -> str:
@@ -292,87 +261,84 @@ def _publish_camera_info(render_product_path: str, *, frame_id: str, topic: str)
     return writer
 
 
-def mount_head_realsense(
+def mount_ee_right_realsense(
     stage,
     robot_prim_path: str = "/World/RBY1",
-) -> HeadRealSenseHandles:
-    """Mount the D435i-like head camera under link_head_2."""
-    head_path = _find_unique_prim_by_name(stage, HEAD_LINK_NAME)
+) -> EERightRealSenseHandles:
+    """Mount a D405-like RGB-D camera under ee_right."""
+    ee_path = _find_unique_prim_by_name(stage, EE_LINK_NAME)
 
-    if not head_path.startswith(robot_prim_path.rstrip("/") + "/"):
+    if not ee_path.startswith(robot_prim_path.rstrip("/") + "/"):
         raise RuntimeError(
-            f"[HeadCamera] Found {HEAD_LINK_NAME} at {head_path}, "
+            f"[EERightCamera] Found {EE_LINK_NAME} at {ee_path}, "
             f"expected under {robot_prim_path}"
         )
 
-    mount_path = f"{head_path}/head_realsense_mount"
-    asset_root_path = f"{mount_path}/rsd455"
+    camera_link_path = f"{ee_path}/right_d405_link"
 
-    mount = UsdGeom.Xform.Define(stage, mount_path)
-    api = UsdGeom.XformCommonAPI(mount.GetPrim())
-    api.SetTranslate(Gf.Vec3d(*HEAD_MOUNT_TRANSLATION_M))
-    api.SetRotate(
-        Gf.Vec3f(*HEAD_MOUNT_ROTATION_DEG),
-        UsdGeom.XformCommonAPI.RotationOrderXYZ,
+    old = stage.GetPrimAtPath(camera_link_path)
+    if old.IsValid():
+        stage.RemovePrim(camera_link_path)
+
+    root = UsdGeom.Xform.Define(stage, camera_link_path)
+    xformable = UsdGeom.Xformable(root.GetPrim())
+
+    xformable.AddTranslateOp().Set(
+        Gf.Vec3d(*MOUNT_TRANSLATION_M)
     )
 
-    asset_path = _resolve_d455_asset()
-    print(f"[HeadCamera] Loading D455 visual rig: {asset_path}")
-    add_reference_to_stage(
-        usd_path=asset_path,
-        prim_path=asset_root_path,
+    qx, qy, qz, qw = (float(v) for v in MOUNT_ROTATION_XYZW)
+    norm = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+    if norm <= 1.0e-12:
+        raise ValueError("[EERightCamera] Mount quaternion must be non-zero.")
+
+    qx, qy, qz, qw = (v / norm for v in (qx, qy, qz, qw))
+
+    xformable.AddOrientOp().Set(
+        Gf.Quatd(qw, Gf.Vec3d(qx, qy, qz))
     )
 
-    d455_body_path = f"{asset_root_path}/RSD455"
-    color_path = f"{d455_body_path}/Camera_OmniVision_OV9782_Color"
-    depth_path = f"{d455_body_path}/Camera_Pseudo_Depth"
+    # Visual-only D405-like enclosure.
+    housing = UsdGeom.Cube.Define(stage, f"{camera_link_path}/Housing")
+    housing.CreateSizeAttr(1.0)
+    housing.AddScaleOp().Set(Gf.Vec3f(*HOUSING_SIZE_M))
+    housing.CreateDisplayColorAttr([Gf.Vec3f(0.12, 0.12, 0.14)])
 
-    _remove_nested_rigid_body(stage, d455_body_path)
+    color_path = f"{camera_link_path}/ColorCamera"
+    depth_path = f"{camera_link_path}/DepthCamera"
 
-    _configure_pinhole(
-        stage,
-        color_path,
-        hfov_deg=COLOR_HFOV_DEG,
-        resolution=RESOLUTION,
-        clip_m=COLOR_CLIP_M,
-    )
-    _configure_pinhole(
-        stage,
-        depth_path,
-        hfov_deg=DEPTH_HFOV_DEG,
-        resolution=RESOLUTION,
-        clip_m=DEPTH_CLIP_M,
-    )
+    _make_camera(stage, color_path, COLOR_CLIP_M)
+    _make_camera(stage, depth_path, DEPTH_CLIP_M)
 
     print(
-        "[HeadCamera] D435i-like camera mounted | "
+        "[EERightCamera] D405-like camera mounted | "
+        f"translation={MOUNT_TRANSLATION_M} | "
+        f"rotation_xyzw={MOUNT_ROTATION_XYZW} | "
         f"{RESOLUTION[0]}x{RESOLUTION[1]} | "
-        f"color HFOV={COLOR_HFOV_DEG:.1f}deg | "
-        f"depth HFOV={DEPTH_HFOV_DEG:.1f}deg"
+        f"depth={DEPTH_CLIP_M[0]:.2f}-{DEPTH_CLIP_M[1]:.2f}m"
     )
 
-    return HeadRealSenseHandles(
-        head_path=head_path,
-        mount_path=mount_path,
-        asset_root_path=asset_root_path,
+    return EERightRealSenseHandles(
+        ee_path=ee_path,
+        camera_link_path=camera_link_path,
         color_camera_path=color_path,
         depth_camera_path=depth_path,
     )
 
 
-def start_head_realsense_ros(
-    handles: HeadRealSenseHandles,
-) -> HeadRealSenseHandles:
-    """Start ROS 2 publishers for the head RGB-D camera."""
+def start_ee_right_realsense_ros(
+    handles: EERightRealSenseHandles,
+) -> EERightRealSenseHandles:
+    """Start ROS 2 publishers for the right-wrist RGB-D camera."""
     color_rp = rep.create.render_product(
         handles.color_camera_path,
         RESOLUTION,
-        name="RBY1_Head_D435i_Color",
+        name="RBY1_Right_D405_Color",
     )
     depth_rp = rep.create.render_product(
         handles.depth_camera_path,
         RESOLUTION,
-        name="RBY1_Head_D435i_Depth",
+        name="RBY1_Right_D405_Depth",
     )
 
     color_rp_path = _render_product_path(color_rp)
@@ -407,7 +373,7 @@ def start_head_realsense_ros(
     handles.depth_render_product = depth_rp_path
     handles.writers = writers
 
-    print("[HeadCamera] ROS publishers READY")
+    print("[EERightCamera] ROS publishers READY")
     print(f"  /{NODE_NAMESPACE}/{COLOR_IMAGE_TOPIC}")
     print(f"  /{NODE_NAMESPACE}/{COLOR_INFO_TOPIC}")
     print(f"  /{NODE_NAMESPACE}/{DEPTH_IMAGE_TOPIC}")

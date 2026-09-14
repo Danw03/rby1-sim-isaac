@@ -15,6 +15,9 @@ from isaacsim.core.api.tasks import BaseTask
 from isaacsim.core.utils.rotations import quat_to_rot_matrix
 from isaacsim.core.utils.stage import add_reference_to_stage
 from pxr import Gf, Sdf, UsdPhysics
+from lab_environment import add_lab_environment
+from head_realsense import mount_head_realsense
+
 
 from config import PD_CONTROL_DT
 from gripper_servers import BaseGripperServer
@@ -297,6 +300,8 @@ class RBY1Task(BaseTask):
         )
         ground_plane._collision_prim.set_contact_offset(0.002)
         ground_plane._collision_prim.set_rest_offset(0.0)
+        
+        add_lab_environment(scene.stage)
 
         if self.gripper_asset_config is None:
             gripper_label = "off" if not self.gripper_enabled else "base-usd"
@@ -307,6 +312,8 @@ class RBY1Task(BaseTask):
             f"usd_path={self.usd_path}"
         )
         add_reference_to_stage(usd_path=self.usd_path, prim_path=self.robot_prim_path)
+        self.head_realsense = mount_head_realsense(scene.stage, robot_prim_path=self.robot_prim_path)
+
         if self.gripper_asset_config is not None:
             self._add_gripper_to_robot(scene.stage)
 

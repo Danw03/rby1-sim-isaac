@@ -160,6 +160,12 @@ docker run \
     -e "ACCEPT_EULA=Y" \
     -e "PRIVACY_CONSENT=Y" \
     -e "DISPLAY=${DISPLAY}" \
+    -e "ROS_DOMAIN_ID=20" \
+    -e "ROS_DISTRO=humble" \
+    -e "RMW_IMPLEMENTATION=rmw_fastrtps_cpp" \
+    -e "LD_LIBRARY_PATH=/opt/rby1-sim-isaac/sdk/app:/isaac-sim/exts/isaacsim.ros2.bridge/humble/lib" \
+    -e "FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/fastdds.xml" \
+    -v "$HOME/rby1-sim-isaac/docker/fastdds.xml:/tmp/fastdds.xml:ro" \
     -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
     -v "${HOME}/.Xauthority:/isaac-sim/.Xauthority:rw" \
     "${SRC_MOUNT[@]}" \

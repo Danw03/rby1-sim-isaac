@@ -182,7 +182,20 @@ class Simulation:
     def initial_reset(self) -> None:
         self.world.reset()
         self.world.initialize_physics()
+
         self.robot = self.world.scene.get_object("RBY1")
+
+        # Give RTX / sensor USD / render products time to initialize
+        self.world.render()
+        self.simulator.update()
+        self.simulator.update()
+
+        from head_realsense import start_head_realsense_ros
+
+        self.head_camera_writers = start_head_realsense_ros(
+            self.task.head_realsense
+        )
+
         self._last_render_wall_time = 0.0
         self.world.pause()
 
@@ -234,14 +247,27 @@ class Simulation:
             self.simulator.close()
 
     def simulation_step(self) -> None:
-        """Run one physics step and decouple rendering from the physics rate."""
+        """Run one physics step and render at the configured wall-clock rate."""
+        now = time.monotonic()
+
+        render_due = (
+            now - self._last_render_wall_time >= self._rendering_dt
+        )
+
         if self.world.is_playing():
-            # Isaac lockstep: World.step(render=False) drives one physics step and the task pre_step.
-            self.world.step(render=False)
+            # IMPORTANT:
+            # Camera/ROS2 SDG pipeline must be ticked through step(render=True).
+            self.world.step(render=render_due)
+
             self.task.post_physics_step(self._physics_dt)
-            self._render_if_due()
+
+            if render_due:
+                self._last_render_wall_time = now
+
         else:
-            self._render_if_due()
+            if render_due:
+                self.world.render()
+                self._last_render_wall_time = now
 
     def _render_if_due(self) -> None:
         """Render at most once per ``rendering_dt`` (wall-clock based)."""
@@ -440,7 +466,14 @@ def main() -> None:
     if args.sim_gripper and not gripper_enabled:
         print("[Simulation] --sim-gripper ignored because --no-gripper is set.")
 
+    os.environ.setdefault("ROS_DOMAIN_ID", "20")
+
     simulation_app = SimulationApp({"headless": False})
+
+    from isaacsim.core.utils.extensions import enable_extension
+    enable_extension("isaacsim.ros2.bridge")
+
+    simulation_app.update()
 
     simulation = Simulation(
         simulation_app,
